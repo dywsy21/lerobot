@@ -22,6 +22,8 @@ import pytest
 from lerobot.robots.so_follower import (
     SO100Follower,
     SO100FollowerConfig,
+    SO101SCS215Follower,
+    SO101SCS215FollowerConfig,
 )
 
 
@@ -149,3 +151,85 @@ def test_configure_writes_position_pid_coefficients():
     bus_mock.write.assert_any_call("P_Coefficient", "shoulder_pan", 32)
     bus_mock.write.assert_any_call("I_Coefficient", "shoulder_pan", 1)
     bus_mock.write.assert_any_call("D_Coefficient", "shoulder_pan", 16)
+
+
+def test_scs215_follower_uses_protocol_1_and_scs215_models(tmp_path):
+    from lerobot.motors import MotorNormMode
+
+    bus_mock = _make_bus_mock()
+
+    def _bus_side_effect(*_args, **kwargs):
+        bus_mock.motors = kwargs["motors"]
+        return bus_mock
+
+    with patch(
+        "lerobot.robots.so_follower.so_follower.FeetechMotorsBus",
+        side_effect=_bus_side_effect,
+    ) as bus_cls:
+        cfg = SO101SCS215FollowerConfig(port="/dev/null", calibration_dir=tmp_path)
+        robot = SO101SCS215Follower(cfg)
+
+    assert robot.name == "so101_scs215_follower"
+    assert {motor.model for motor in robot.bus.motors.values()} == {"scs215"}
+    assert {motor.norm_mode for motor in robot.bus.motors.values()} == {MotorNormMode.RANGE_0_1}
+    assert bus_cls.call_args.kwargs["protocol_version"] == 1
+
+
+def test_scs215_configure_skips_unsupported_registers():
+    from lerobot.motors import Motor, MotorNormMode
+    from lerobot.motors.feetech.tables import SCS_SERIES_CONTROL_TABLE
+
+    robot = object.__new__(SO101SCS215Follower)
+    robot.config = SO101SCS215FollowerConfig(port="/dev/null")
+    robot.bus = _make_bus_mock()
+    robot.bus.motors = {
+        "shoulder_pan": Motor(1, "scs215", MotorNormMode.DEGREES),
+        "gripper": Motor(6, "scs215", MotorNormMode.RANGE_0_100),
+    }
+    robot.bus.model_ctrl_table = {"scs215": SCS_SERIES_CONTROL_TABLE}
+
+    robot.configure()
+
+    written_registers = [call.args[0] for call in robot.bus.write.call_args_list]
+    assert "Operating_Mode" not in written_registers
+    assert "Protection_Current" not in written_registers
+    assert "Overload_Torque" not in written_registers
+    assert "P_Coefficient" in written_registers
+    assert "Max_Torque_Limit" in written_registers
+
+
+def test_scs215_calibration_records_every_motor_range(monkeypatch, tmp_path):
+    from lerobot.motors import Motor, MotorNormMode
+    from lerobot.motors.feetech.tables import MODEL_RESOLUTION, SCS_SERIES_CONTROL_TABLE
+
+    robot = object.__new__(SO101SCS215Follower)
+    robot.id = "test_scs215"
+    robot.calibration = {}
+    robot.calibration_fpath = tmp_path / "test_scs215.json"
+    robot._save_calibration = MagicMock()
+    robot.bus = _make_bus_mock()
+    robot.bus.motors = {
+        "shoulder_pan": Motor(1, "scs215", MotorNormMode.DEGREES),
+        "shoulder_lift": Motor(2, "scs215", MotorNormMode.DEGREES),
+        "elbow_flex": Motor(3, "scs215", MotorNormMode.DEGREES),
+        "wrist_flex": Motor(4, "scs215", MotorNormMode.DEGREES),
+        "wrist_roll": Motor(5, "scs215", MotorNormMode.DEGREES),
+        "gripper": Motor(6, "scs215", MotorNormMode.RANGE_0_100),
+    }
+    robot.bus.model_ctrl_table = {"scs215": SCS_SERIES_CONTROL_TABLE}
+    robot.bus.model_resolution_table = MODEL_RESOLUTION
+    robot.bus.set_half_turn_homings.return_value = dict.fromkeys(robot.bus.motors, 0)
+    ranged_motors = list(robot.bus.motors)
+    robot.bus.record_ranges_of_motion.return_value = (
+        dict.fromkeys(ranged_motors, 100),
+        dict.fromkeys(ranged_motors, 900),
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+
+    robot.calibrate()
+
+    assert robot.calibration["wrist_roll"].range_min == 100
+    assert robot.calibration["wrist_roll"].range_max == 900
+    robot.bus.record_ranges_of_motion.assert_called_once_with(ranged_motors)
+    robot.bus.write_calibration.assert_called_once_with(robot.calibration)
+    robot._save_calibration.assert_called_once()

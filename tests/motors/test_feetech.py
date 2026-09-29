@@ -24,7 +24,16 @@ import pytest
 from lerobot.motors import Motor, MotorCalibration, MotorNormMode
 from lerobot.motors.encoding_utils import encode_sign_magnitude
 from lerobot.motors.feetech import MODEL_NUMBER, MODEL_NUMBER_TABLE, FeetechMotorsBus
-from lerobot.motors.feetech.tables import STS_SMS_SERIES_CONTROL_TABLE
+from lerobot.motors.feetech.tables import (
+    MODEL_BAUDRATE_TABLE,
+    MODEL_CONTROL_TABLE,
+    MODEL_DEGREE_RANGE,
+    MODEL_ENCODING_TABLE,
+    MODEL_PROTOCOL,
+    MODEL_RESOLUTION,
+    SCS_SERIES_CONTROL_TABLE,
+    STS_SMS_SERIES_CONTROL_TABLE,
+)
 
 try:
     import scservo_sdk as scs
@@ -61,6 +70,15 @@ def dummy_motors() -> dict[str, Motor]:
 
 
 @pytest.fixture
+def scs215_motors() -> dict[str, Motor]:
+    return {
+        "dummy_1": Motor(1, "scs215", MotorNormMode.RANGE_M100_100),
+        "dummy_2": Motor(2, "scs215", MotorNormMode.RANGE_M100_100),
+        "dummy_3": Motor(3, "scs215", MotorNormMode.RANGE_M100_100),
+    }
+
+
+@pytest.fixture
 def dummy_calibration(dummy_motors) -> dict[str, MotorCalibration]:
     homings = [-709, -2006, 1624]
     mins = [43, 27, 145]
@@ -75,6 +93,16 @@ def dummy_calibration(dummy_motors) -> dict[str, MotorCalibration]:
             range_max=maxes[m.id - 1],
         )
     return calibration
+
+
+def test_scs215_model_metadata():
+    assert MODEL_NUMBER_TABLE["scs215"] == 1315
+    assert MODEL_CONTROL_TABLE["scs215"] is SCS_SERIES_CONTROL_TABLE
+    assert MODEL_RESOLUTION["scs215"] == 1024
+    assert MODEL_DEGREE_RANGE["scs215"] == 300.0
+    assert MODEL_BAUDRATE_TABLE["scs215"][1_000_000] == 0
+    assert MODEL_ENCODING_TABLE["scs215"] == {}
+    assert MODEL_PROTOCOL["scs215"] == 1
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason=f"No patching needed on {sys.platform=}")
@@ -307,6 +335,33 @@ def test__sync_read_retries_after_transient_failure(mock_motors, dummy_motors):
     assert mock_motors.stubs[stub].calls == 2
 
 
+def test_protocol_1_sync_read_falls_back_to_sequential_reads(mock_motors, scs215_motors):
+    expected = {1: 123, 2: 456, 3: 789}
+    bus = FeetechMotorsBus(
+        port=mock_motors.port,
+        motors=scs215_motors,
+        protocol_version=1,
+    )
+    bus.connect(handshake=False)
+    stubs = [
+        mock_motors.build_read_stub(
+            *SCS_SERIES_CONTROL_TABLE["Present_Position"],
+            id_,
+            value,
+        )
+        for id_, value in expected.items()
+    ]
+
+    values = bus.sync_read("Present_Position", normalize=False)
+
+    assert values == {
+        "dummy_1": 123,
+        "dummy_2": 456,
+        "dummy_3": 789,
+    }
+    assert all(mock_motors.stubs[stub].called for stub in stubs)
+
+
 @pytest.mark.parametrize("raise_on_error", (True, False))
 def test__sync_read_comm(raise_on_error, mock_motors, dummy_motors):
     addr, length, ids_values = (10, 4, {1: 1337})
@@ -403,6 +458,46 @@ def test_reset_calibration(mock_motors, dummy_motors):
     assert all(mock_motors.stubs[stub].wait_called() for stub in write_homing_stubs)
     assert all(mock_motors.stubs[stub].wait_called() for stub in write_mins_stubs)
     assert all(mock_motors.stubs[stub].wait_called() for stub in write_maxes_stubs)
+
+
+def test_protocol_1_reset_calibration_skips_homing_offset(mock_motors, scs215_motors):
+    bus = FeetechMotorsBus(
+        port=mock_motors.port,
+        motors=scs215_motors,
+        protocol_version=1,
+    )
+    bus.connect(handshake=False)
+    write_mins_stubs = []
+    write_maxes_stubs = []
+    for motor in scs215_motors.values():
+        write_mins_stubs.append(
+            mock_motors.build_write_stub(*SCS_SERIES_CONTROL_TABLE["Min_Position_Limit"], motor.id, 0)
+        )
+        write_maxes_stubs.append(
+            mock_motors.build_write_stub(*SCS_SERIES_CONTROL_TABLE["Max_Position_Limit"], motor.id, 1023)
+        )
+
+    with patch.object(bus, "write", wraps=bus.write) as mock_write:
+        bus.reset_calibration()
+
+    assert "Homing_Offset" not in [call.args[0] for call in mock_write.call_args_list]
+    assert all(mock_motors.stubs[stub].wait_called() for stub in write_mins_stubs)
+    assert all(mock_motors.stubs[stub].wait_called() for stub in write_maxes_stubs)
+
+
+def test_protocol_1_half_turn_homings_are_software_only(mock_motors, scs215_motors):
+    bus = FeetechMotorsBus(
+        port=mock_motors.port,
+        motors=scs215_motors,
+        protocol_version=1,
+    )
+    bus.connect(handshake=False)
+    bus.reset_calibration = MagicMock()
+
+    homings = bus.set_half_turn_homings()
+
+    assert homings == {"dummy_1": 0, "dummy_2": 0, "dummy_3": 0}
+    bus.reset_calibration.assert_called_once_with(["dummy_1", "dummy_2", "dummy_3"])
 
 
 def test_set_half_turn_homings(mock_motors, dummy_motors):

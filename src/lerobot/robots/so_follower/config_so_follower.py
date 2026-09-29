@@ -15,6 +15,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 from lerobot.cameras import CameraConfig
 
@@ -27,6 +28,9 @@ class SOFollowerConfig:
 
     # Port to connect to the arm
     port: str
+
+    # Feetech motor model used by all six joints.
+    motor_model: ClassVar[str] = "sts3215"
 
     disable_torque_on_disconnect: bool = True
 
@@ -41,7 +45,7 @@ class SOFollowerConfig:
     # Set to `True` for backward compatibility with previous policies/dataset
     use_degrees: bool = True
 
-    # Position-mode PID gains written to Feetech STS3215 motors at connect time.
+    # Position-mode PID gains written to Feetech motors at connect time.
     position_p_coefficient: int = 16
     position_i_coefficient: int = 0
     position_d_coefficient: int = 32
@@ -58,6 +62,12 @@ class SOFollowerConfig:
 @dataclass
 class SOFollowerRobotConfig(RobotConfig, SOFollowerConfig):
     pass
+
+
+@RobotConfig.register_subclass("so101_scs215_follower")
+@dataclass
+class SO101SCS215FollowerConfig(SOFollowerRobotConfig):
+    motor_model: ClassVar[str] = "scs215"
 
 
 SO100FollowerConfig = SOFollowerRobotConfig

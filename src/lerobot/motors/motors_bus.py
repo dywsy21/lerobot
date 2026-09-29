@@ -167,9 +167,23 @@ def assert_same_address(model_ctrl_table: dict[str, dict], motor_models: list[st
 
 
 class MotorNormMode(str, Enum):
+    RANGE_0_1 = "range_0_1"
     RANGE_0_100 = "range_0_100"
     RANGE_M100_100 = "range_m100_100"
     DEGREES = "degrees"
+
+
+def split_circular_range(range_min: int, range_max: int, resolution: int) -> list[tuple[int, int]]:
+    """Record an ordered calibrated arc as one or two raw encoder intervals."""
+    span = range_max - range_min
+    if resolution <= 0 or not 0 < span < resolution:
+        raise ValueError("A circular calibration range must span 1 to resolution - 1 ticks.")
+
+    start = range_min % resolution
+    end = start + span
+    if end < resolution:
+        return [(start, end)]
+    return [(start, resolution - 1), (0, end - resolution)]
 
 
 @dataclass
@@ -179,6 +193,7 @@ class MotorCalibration:
     homing_offset: int
     range_min: int
     range_max: int
+    range_segments: list[tuple[int, int]] | None = None
 
 
 @dataclass
@@ -349,6 +364,8 @@ class SerialMotorsBus(MotorsBusBase):
     model_encoding_table: dict[str, dict]
     model_number_table: dict[str, int]
     model_resolution_table: dict[str, int]
+    model_degree_range_table: dict[str, float] = {}
+    circular_position_models: frozenset[str] = frozenset()
     normalized_data: list[str]
 
     def __init__(
@@ -819,13 +836,24 @@ class SerialMotorsBus(MotorsBusBase):
         """
         motor_names = self._get_motors_list(motors)
 
-        start_positions = self.sync_read("Present_Position", motor_names, normalize=False, num_retry=5)
-        mins = start_positions.copy()
-        maxes = start_positions.copy()
+        raw_positions = self.sync_read("Present_Position", motor_names, normalize=False, num_retry=5)
+        positions = raw_positions.copy()
+        mins = positions.copy()
+        maxes = positions.copy()
 
         user_pressed_enter = False
         while not user_pressed_enter:
-            positions = self.sync_read("Present_Position", motor_names, normalize=False, num_retry=5)
+            next_raw_positions = self.sync_read("Present_Position", motor_names, normalize=False, num_retry=5)
+            positions = {
+                motor: self._unwrap_position(
+                    motor,
+                    next_raw_positions[motor],
+                    raw_positions[motor],
+                    positions[motor],
+                )
+                for motor in motor_names
+            }
+            raw_positions = next_raw_positions
             mins = {motor: min(positions[motor], min_) for motor, min_ in mins.items()}
             maxes = {motor: max(positions[motor], max_) for motor, max_ in maxes.items()}
 
@@ -851,6 +879,74 @@ class SerialMotorsBus(MotorsBusBase):
 
         return mins, maxes
 
+    def _unwrap_position(
+        self,
+        motor: str,
+        raw_position: Value,
+        previous_raw_position: Value,
+        previous_unwrapped_position: Value,
+    ) -> Value:
+        """Place a wrapped encoder sample next to the previous continuous sample."""
+        model = self.motors[motor].model
+        if model not in self.circular_position_models:
+            return raw_position
+
+        resolution = self.model_resolution_table[model]
+        delta = raw_position - previous_raw_position
+        half_resolution = resolution / 2
+        if delta > half_resolution:
+            delta -= resolution
+        elif delta < -half_resolution:
+            delta += resolution
+        return previous_unwrapped_position + delta
+
+    def _position_in_calibration_frame(self, motor: str, raw_position: Value) -> Value:
+        """Map both ordered encoder intervals to one continuous calibrated arc."""
+        model = self.motors[motor].model
+        if model not in self.circular_position_models:
+            return raw_position
+
+        calibration = self.calibration[motor]
+        resolution = self.model_resolution_table[model]
+        raw = int(raw_position) % resolution
+        offset = 0
+        for start, end in self._calibration_segments(motor):
+            if start <= raw <= end:
+                return calibration.range_min + offset + raw - start
+            offset += end - start + 1
+
+        # Outside the recorded arc, clamp to the closer endpoint. Never select a
+        # different turn by rounding around the midpoint of a wide range.
+        distance_from_start = (raw - calibration.range_min) % resolution
+        distance_to_end = distance_from_start - (calibration.range_max - calibration.range_min)
+        distance_to_start = resolution - distance_from_start
+        return calibration.range_max if distance_to_end <= distance_to_start else calibration.range_min
+
+    def _calibration_segments(self, motor: str) -> list[tuple[int, int]]:
+        calibration = self.calibration[motor]
+        resolution = self.model_resolution_table[self.motors[motor].model]
+        expected = split_circular_range(calibration.range_min, calibration.range_max, resolution)
+        if calibration.range_segments is not None and calibration.range_segments != expected:
+            raise ValueError(f"Invalid range_segments for motor '{motor}': expected {expected}.")
+        return expected
+
+    def _segment_for_position(self, motor: str, raw_position: int) -> int | None:
+        raw = raw_position % self.model_resolution_table[self.motors[motor].model]
+        for index, (start, end) in enumerate(self._calibration_segments(motor)):
+            if start <= raw <= end:
+                return index
+        return None
+
+    def _prepare_goal_positions(self, ids_values: dict[int, int]) -> None:
+        """Allow drivers to perform a mode transition before sending raw goals."""
+
+    def _position_in_device_frame(self, motor: str, position: int) -> int:
+        """Wrap a continuous calibrated position back into the encoder register range."""
+        model = self.motors[motor].model
+        if model not in self.circular_position_models:
+            return position
+        return position % self.model_resolution_table[model]
+
     def _normalize(self, ids_values: dict[int, int]) -> dict[int, float]:
         if not self.calibration:
             raise RuntimeError(f"{self} has no calibration registered.")
@@ -864,8 +960,12 @@ class SerialMotorsBus(MotorsBusBase):
             if max_ == min_:
                 raise ValueError(f"Invalid calibration for motor '{motor}': min and max are equal.")
 
-            bounded_val = min(max_, max(min_, val))
-            if self.motors[motor].norm_mode is MotorNormMode.RANGE_M100_100:
+            calibrated_val = self._position_in_calibration_frame(motor, val)
+            bounded_val = min(max_, max(min_, calibrated_val))
+            if self.motors[motor].norm_mode is MotorNormMode.RANGE_0_1:
+                norm = (bounded_val - min_) / (max_ - min_)
+                normalized_values[id_] = 1 - norm if drive_mode else norm
+            elif self.motors[motor].norm_mode is MotorNormMode.RANGE_M100_100:
                 norm = (((bounded_val - min_) / (max_ - min_)) * 200) - 100
                 normalized_values[id_] = -norm if drive_mode else norm
             elif self.motors[motor].norm_mode is MotorNormMode.RANGE_0_100:
@@ -873,8 +973,10 @@ class SerialMotorsBus(MotorsBusBase):
                 normalized_values[id_] = 100 - norm if drive_mode else norm
             elif self.motors[motor].norm_mode is MotorNormMode.DEGREES:
                 mid = (min_ + max_) / 2
-                max_res = self.model_resolution_table[self._id_to_model(id_)] - 1
-                normalized_values[id_] = (val - mid) * 360 / max_res
+                model = self._id_to_model(id_)
+                max_res = self.model_resolution_table[model] - 1
+                degree_range = self.model_degree_range_table.get(model, 360)
+                normalized_values[id_] = (calibrated_val - mid) * degree_range / max_res
             else:
                 raise NotImplementedError
 
@@ -893,20 +995,28 @@ class SerialMotorsBus(MotorsBusBase):
             if max_ == min_:
                 raise ValueError(f"Invalid calibration for motor '{motor}': min and max are equal.")
 
-            if self.motors[motor].norm_mode is MotorNormMode.RANGE_M100_100:
+            if self.motors[motor].norm_mode is MotorNormMode.RANGE_0_1:
+                val = 1 - val if drive_mode else val
+                bounded_val = min(1.0, max(0.0, val))
+                position = int(bounded_val * (max_ - min_) + min_)
+            elif self.motors[motor].norm_mode is MotorNormMode.RANGE_M100_100:
                 val = -val if drive_mode else val
                 bounded_val = min(100.0, max(-100.0, val))
-                unnormalized_values[id_] = int(((bounded_val + 100) / 200) * (max_ - min_) + min_)
+                position = int(((bounded_val + 100) / 200) * (max_ - min_) + min_)
             elif self.motors[motor].norm_mode is MotorNormMode.RANGE_0_100:
                 val = 100 - val if drive_mode else val
                 bounded_val = min(100.0, max(0.0, val))
-                unnormalized_values[id_] = int((bounded_val / 100) * (max_ - min_) + min_)
+                position = int((bounded_val / 100) * (max_ - min_) + min_)
             elif self.motors[motor].norm_mode is MotorNormMode.DEGREES:
                 mid = (min_ + max_) / 2
-                max_res = self.model_resolution_table[self._id_to_model(id_)] - 1
-                unnormalized_values[id_] = int((val * max_res / 360) + mid)
+                model = self._id_to_model(id_)
+                max_res = self.model_resolution_table[model] - 1
+                degree_range = self.model_degree_range_table.get(model, 360)
+                position = int((val * max_res / degree_range) + mid)
             else:
                 raise NotImplementedError
+
+            unnormalized_values[id_] = self._position_in_device_frame(motor, position)
 
         return unnormalized_values
 
@@ -1091,6 +1201,9 @@ class SerialMotorsBus(MotorsBusBase):
         if normalize and data_name in self.normalized_data:
             int_value = self._unnormalize({id_: value})[id_]
 
+        if data_name == "Goal_Position":
+            self._prepare_goal_positions({id_: int_value})
+
         int_value = self._encode_sign(data_name, {id_: int_value})[id_]
 
         err_msg = f"Failed to write '{data_name}' on {id_=} with '{int_value}' after {num_retry + 1} tries."
@@ -1251,6 +1364,9 @@ class SerialMotorsBus(MotorsBusBase):
         int_ids_values = {id_: int(val) for id_, val in raw_ids_values.items()}
         if normalize and data_name in self.normalized_data:
             int_ids_values = self._unnormalize(raw_ids_values)
+
+        if data_name == "Goal_Position":
+            self._prepare_goal_positions(int_ids_values)
 
         int_ids_values = self._encode_sign(data_name, int_ids_values)
 

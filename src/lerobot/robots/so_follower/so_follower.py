@@ -22,14 +22,17 @@ from lerobot.cameras import make_cameras_from_configs
 from lerobot.lerobot_types import RobotAction, RobotObservation
 from lerobot.motors import Motor, MotorCalibration, MotorNormMode
 from lerobot.motors.feetech import (
+    MODEL_POSITION_WRAPAROUND,
+    MODEL_PROTOCOL,
     FeetechMotorsBus,
     OperatingMode,
 )
+from lerobot.motors.motors_bus import split_circular_range
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
 from ..robot import Robot
 from ..utils import ensure_safe_goal_position
-from .config_so_follower import SOFollowerRobotConfig
+from .config_so_follower import SO101SCS215FollowerConfig, SOFollowerRobotConfig
 
 logger = logging.getLogger(__name__)
 
@@ -67,21 +70,32 @@ class SOFollower(Robot):
     def __init__(self, config: SOFollowerRobotConfig):
         super().__init__(config)
         self.config = config
-        # choose normalization mode depending on config if available
-        norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
+        motor_model = config.motor_model
+        uses_circular_positions = motor_model in MODEL_POSITION_WRAPAROUND
+        if uses_circular_positions:
+            norm_mode_body = MotorNormMode.RANGE_0_1
+            norm_mode_gripper = MotorNormMode.RANGE_0_1
+        else:
+            norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
+            norm_mode_gripper = MotorNormMode.RANGE_0_100
         self.bus = FeetechMotorsBus(
             port=self.config.port,
             motors={
-                "shoulder_pan": Motor(1, "sts3215", norm_mode_body),
-                "shoulder_lift": Motor(2, "sts3215", norm_mode_body),
-                "elbow_flex": Motor(3, "sts3215", norm_mode_body),
-                "wrist_flex": Motor(4, "sts3215", norm_mode_body),
-                "wrist_roll": Motor(5, "sts3215", norm_mode_body),
-                "gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
+                "shoulder_pan": Motor(1, motor_model, norm_mode_body),
+                "shoulder_lift": Motor(2, motor_model, norm_mode_body),
+                "elbow_flex": Motor(3, motor_model, norm_mode_body),
+                "wrist_flex": Motor(4, motor_model, norm_mode_body),
+                "wrist_roll": Motor(5, motor_model, norm_mode_body),
+                "gripper": Motor(6, motor_model, norm_mode_gripper),
             },
             calibration=self.calibration,
+            protocol_version=MODEL_PROTOCOL[motor_model],
         )
         self.cameras = make_cameras_from_configs(config.cameras)
+
+    def _supports_register(self, motor: str, data_name: str) -> bool:
+        model = self.bus.motors[motor].model
+        return data_name in self.bus.model_ctrl_table[model]
 
     @property
     def _motors_ft(self) -> dict[str, type]:
@@ -147,23 +161,36 @@ class SOFollower(Robot):
         logger.info(f"\nRunning calibration of {self}")
         self.bus.disable_torque()
         for motor in self.bus.motors:
-            self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
+            if self._supports_register(motor, "Operating_Mode"):
+                self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
 
-        print(_HOMING_POSITION_DIAGRAM)
-        print("Video walkthrough: https://huggingface.co/docs/lerobot/main/en/so101#calibration-video")
-        input(f"Move {self} to the middle of its range of motion (shown above) and press ENTER....")
-        homing_offsets = self.bus.set_half_turn_homings()
-
-        # Attempt to call record_ranges_of_motion with a reduced motor set when appropriate.
-        full_turn_motor = "wrist_roll"
-        unknown_range_motors = [motor for motor in self.bus.motors if motor != full_turn_motor]
-        print(
-            f"Move all joints except '{full_turn_motor}' sequentially through their "
-            "entire ranges of motion.\nRecording positions. Press ENTER to stop..."
+        circular_positions = all(
+            motor.model in MODEL_POSITION_WRAPAROUND for motor in self.bus.motors.values()
         )
-        range_mins, range_maxes = self.bus.record_ranges_of_motion(unknown_range_motors)
-        range_mins[full_turn_motor] = 0
-        range_maxes[full_turn_motor] = 4095
+        if circular_positions:
+            homing_offsets = self.bus.set_half_turn_homings()
+            range_motors = list(self.bus.motors)
+            print(
+                "Move every joint sequentially through its entire range of motion.\n"
+                "Recording continuous positions across encoder wraparound. Press ENTER to stop..."
+            )
+            range_mins, range_maxes = self.bus.record_ranges_of_motion(range_motors)
+        else:
+            print(_HOMING_POSITION_DIAGRAM)
+            print("Video walkthrough: https://huggingface.co/docs/lerobot/main/en/so101#calibration-video")
+            input(f"Move {self} to the middle of its range of motion (shown above) and press ENTER....")
+            homing_offsets = self.bus.set_half_turn_homings()
+
+            full_turn_motor = "wrist_roll"
+            range_motors = [motor for motor in self.bus.motors if motor != full_turn_motor]
+            print(
+                f"Move all joints except '{full_turn_motor}' sequentially through their "
+                "entire ranges of motion.\nRecording positions. Press ENTER to stop..."
+            )
+            range_mins, range_maxes = self.bus.record_ranges_of_motion(range_motors)
+            range_mins[full_turn_motor] = 0
+            full_turn_model = self.bus.motors[full_turn_motor].model
+            range_maxes[full_turn_motor] = self.bus.model_resolution_table[full_turn_model] - 1
 
         self.calibration = {}
         for motor, m in self.bus.motors.items():
@@ -173,6 +200,13 @@ class SOFollower(Robot):
                 homing_offset=homing_offsets[motor],
                 range_min=range_mins[motor],
                 range_max=range_maxes[motor],
+                range_segments=(
+                    split_circular_range(
+                        range_mins[motor], range_maxes[motor], self.bus.model_resolution_table[m.model]
+                    )
+                    if m.model in MODEL_POSITION_WRAPAROUND
+                    else None
+                ),
             )
 
         self.bus.write_calibration(self.calibration)
@@ -183,15 +217,18 @@ class SOFollower(Robot):
         with self.bus.torque_disabled():
             self.bus.configure_motors()
             for motor in self.bus.motors:
-                self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
+                if self._supports_register(motor, "Operating_Mode"):
+                    self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
                 self.bus.write("P_Coefficient", motor, self.config.position_p_coefficient)
                 self.bus.write("I_Coefficient", motor, self.config.position_i_coefficient)
                 self.bus.write("D_Coefficient", motor, self.config.position_d_coefficient)
 
                 if motor == "gripper":
                     self.bus.write("Max_Torque_Limit", motor, 500)  # 50% of max torque to avoid burnout
-                    self.bus.write("Protection_Current", motor, 250)  # 50% of max current to avoid burnout
-                    self.bus.write("Overload_Torque", motor, 25)  # 25% torque when overloaded
+                    if self._supports_register(motor, "Protection_Current"):
+                        self.bus.write("Protection_Current", motor, 250)  # 50% of max current
+                    if self._supports_register(motor, "Overload_Torque"):
+                        self.bus.write("Overload_Torque", motor, 25)  # 25% torque when overloaded
 
     def setup_motors(self) -> None:
         for motor in reversed(self.bus.motors):
@@ -263,3 +300,8 @@ class SOFollower(Robot):
 
 SO100Follower = SOFollower
 SO101Follower = SOFollower
+
+
+class SO101SCS215Follower(SOFollower):
+    config_class = SO101SCS215FollowerConfig
+    name = "so101_scs215_follower"

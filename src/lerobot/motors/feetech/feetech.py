@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import logging
+import time
+from collections.abc import Sequence
 from copy import deepcopy
 from enum import Enum
 from pprint import pformat
@@ -22,14 +24,17 @@ from lerobot.utils.import_utils import _feetech_sdk_available, require_package
 
 from ..encoding_utils import decode_sign_magnitude, encode_sign_magnitude
 from ..motors_bus import Motor, MotorCalibration, NameOrID, SerialMotorsBus, Value, get_address
+from .scs215 import Scs215SeamController
 from .tables import (
     FIRMWARE_MAJOR_VERSION,
     FIRMWARE_MINOR_VERSION,
     MODEL_BAUDRATE_TABLE,
     MODEL_CONTROL_TABLE,
+    MODEL_DEGREE_RANGE,
     MODEL_ENCODING_TABLE,
     MODEL_NUMBER,
     MODEL_NUMBER_TABLE,
+    MODEL_POSITION_WRAPAROUND,
     MODEL_PROTOCOL,
     MODEL_RESOLUTION,
     SCAN_BAUDRATES,
@@ -98,9 +103,11 @@ class FeetechMotorsBus(SerialMotorsBus):
     default_timeout = DEFAULT_TIMEOUT_MS
     model_baudrate_table = deepcopy(MODEL_BAUDRATE_TABLE)
     model_ctrl_table = deepcopy(MODEL_CONTROL_TABLE)
+    model_degree_range_table = deepcopy(MODEL_DEGREE_RANGE)
     model_encoding_table = deepcopy(MODEL_ENCODING_TABLE)
     model_number_table = deepcopy(MODEL_NUMBER_TABLE)
     model_resolution_table = deepcopy(MODEL_RESOLUTION)
+    circular_position_models = MODEL_POSITION_WRAPAROUND
     normalized_data = deepcopy(NORMALIZED_DATA)
 
     def __init__(
@@ -132,15 +139,157 @@ class FeetechMotorsBus(SerialMotorsBus):
         if any(MODEL_PROTOCOL[model] != self.protocol_version for model in self.models):
             raise RuntimeError("Some motors use an incompatible protocol.")
 
+    def _scs215_write(self, motor: str, register: str, value: int) -> None:
+        """Internal raw write; transition goals must not recursively plan again."""
+        addr, length = get_address(self.model_ctrl_table, self.motors[motor].model, register)
+        self._write(addr, length, self.motors[motor].id, value, num_retry=1)
+
+    def _restore_scs215_position_mode(
+        self, motor: str, original: dict[str, int], goal: int, disable: bool = False
+    ) -> None:
+        self._scs215_write(motor, "Running_Time", 0)
+        if disable:
+            self._scs215_write(motor, "Torque_Enable", 0)
+        self._scs215_write(motor, "Lock", 1)
+        # Install the local goal BEFORE re-enabling the native position loop.
+        self._scs215_write(motor, "Goal_Position", goal)
+        self._scs215_write(motor, "Max_Position_Limit", original["Max_Position_Limit"])
+        self._scs215_write(motor, "Min_Position_Limit", original["Min_Position_Limit"])
+        self._scs215_write(motor, "Goal_Velocity", original["Goal_Velocity"])
+        self._scs215_write(motor, "Lock", original["Lock"])
+
+    def _prepare_goal_positions(self, ids_values: dict[int, int]) -> None:
+        """Bridge SCS215 seams, keeping the public normalized action unchanged.
+
+        All crossing joints advance together. This synchronous API waits for
+        mode handover only; the native loop completes the final positioning.
+        """
+        motors = [
+            self._id_to_name(id_)
+            for id_ in ids_values
+            if self._id_to_model(id_) == "scs215" and self._id_to_name(id_) in self.calibration
+        ]
+        if not motors:
+            return
+        present = self.sync_read("Present_Position", motors, normalize=False)
+        active: dict[str, Scs215SeamController] = {}
+        for motor in motors:
+            controller = Scs215SeamController(self._calibration_segments(motor))
+            target = ids_values[self.motors[motor].id]
+            if controller.segment(int(present[motor]), nearest=True) != controller.segment(target):
+                active[motor] = controller
+        if not active:
+            return
+
+        originals: dict[str, dict[str, int]] = {}
+        modified: set[str] = set()
+        try:
+            for motor in active:
+                originals[motor] = {
+                    name: int(self.read(name, motor, normalize=False))
+                    for name in ("Min_Position_Limit", "Max_Position_Limit", "Goal_Velocity", "Lock")
+                }
+                if originals[motor]["Max_Position_Limit"] == 0:
+                    originals[motor]["Max_Position_Limit"] = 1023
+                    modified.add(motor)
+                    self._restore_scs215_position_mode(motor, originals[motor], int(present[motor]))
+            # Let the other joints move while the crossing joints change modes.
+            for motor in motors:
+                if motor not in active:
+                    self._scs215_write(motor, "Goal_Position", ids_values[self.motors[motor].id])
+
+            while active:
+                now = time.monotonic()
+                for motor, controller in list(active.items()):
+                    command = controller.step(
+                        int(present[motor]), ids_values[self.motors[motor].id], now
+                    )
+                    if command is None:
+                        continue
+                    modified.add(motor)
+                    if command.kind == "position":
+                        self._scs215_write(motor, "Running_Time", 0)
+                        speed = originals[motor]["Goal_Velocity"]
+                        self._scs215_write(motor, "Goal_Velocity", min(speed or 300, 300))
+                        self._scs215_write(motor, "Goal_Position", command.value)
+                        self._scs215_write(motor, "Torque_Enable", 1)
+                    elif command.kind == "enter_pwm":
+                        # Lock=1 makes limit changes volatile; avoid EEPROM wear.
+                        self._scs215_write(motor, "Lock", 1)
+                        self._scs215_write(motor, "Running_Time", 0)
+                        self._scs215_write(motor, "Min_Position_Limit", 0)
+                        self._scs215_write(motor, "Max_Position_Limit", 0)
+                        if any(
+                            self.read(name, motor, normalize=False) != 0
+                            for name in ("Min_Position_Limit", "Max_Position_Limit")
+                        ):
+                            raise RuntimeError(f"{motor}: SCS215 did not enter motor mode.")
+                        self._scs215_write(motor, "Torque_Enable", 1)
+                        self._scs215_write(motor, "Running_Time", command.value)
+                    elif command.kind == "pwm":
+                        if self.read("Max_Position_Limit", motor, normalize=False) != 0:
+                            raise RuntimeError(f"{motor}: motor mode was reset during crossing.")
+                        self._scs215_write(motor, "Running_Time", command.value)
+                    else:
+                        self._restore_scs215_position_mode(motor, originals[motor], command.value)
+                        del active[motor]
+                        del originals[motor]
+                        modified.discard(motor)
+                if active:
+                    time.sleep(0.01)
+                    present.update(self.sync_read("Present_Position", list(active), normalize=False))
+        except BaseException:
+            for motor, original in originals.items():
+                if motor not in modified:
+                    continue
+                try:
+                    self._restore_scs215_position_mode(motor, original, int(present[motor]), disable=True)
+                except Exception:
+                    logger.exception("Could not restore SCS215 position mode for %s", motor)
+            raise
+
     def _assert_protocol_is_compatible(self, instruction_name: str) -> None:
-        if instruction_name == "sync_read" and self.protocol_version == 1:
-            raise NotImplementedError(
-                "'Sync Read' is not available with Feetech motors using Protocol 1. Use 'Read' sequentially instead."
-            )
         if instruction_name == "broadcast_ping" and self.protocol_version == 1:
             raise NotImplementedError(
                 "'Broadcast Ping' is not available with Feetech motors using Protocol 1. Use 'Ping' sequentially instead."
             )
+
+    def _sync_read(
+        self,
+        addr: int,
+        length: int,
+        motor_ids: list[int],
+        *,
+        num_retry: int = 0,
+        raise_on_error: bool = True,
+        err_msg: str = "",
+    ) -> tuple[dict[int, int], int]:
+        if self.protocol_version == 0:
+            return super()._sync_read(
+                addr,
+                length,
+                motor_ids,
+                num_retry=num_retry,
+                raise_on_error=raise_on_error,
+                err_msg=err_msg,
+            )
+
+        values = {}
+        comm = self._comm_success
+        for motor_id in motor_ids:
+            value, motor_comm, _ = self._read(
+                addr,
+                length,
+                motor_id,
+                num_retry=num_retry,
+                raise_on_error=raise_on_error,
+                err_msg=err_msg,
+            )
+            values[motor_id] = value
+            if not self._is_comm_success(motor_comm):
+                comm = motor_comm
+
+        return values, comm
 
     def _assert_same_firmware(self) -> None:
         firmware_versions = self._read_firmware_version(self.ids, raise_on_error=True)
@@ -226,6 +375,19 @@ class FeetechMotorsBus(SerialMotorsBus):
 
     @property
     def is_calibrated(self) -> bool:
+        circular_motors = {
+            motor for motor, spec in self.motors.items() if spec.model in self.circular_position_models
+        }
+        if circular_motors == set(self.motors):
+            if set(self.calibration) != set(self.motors):
+                return False
+            return all(
+                self.read("Min_Position_Limit", motor, normalize=False) == 0
+                and self.read("Max_Position_Limit", motor, normalize=False)
+                == self.model_resolution_table[self.motors[motor].model] - 1
+                for motor in circular_motors
+            )
+
         motors_calibration = self.read_calibration()
         if set(motors_calibration) != set(self.calibration):
             return False
@@ -269,11 +431,41 @@ class FeetechMotorsBus(SerialMotorsBus):
         for motor, calibration in calibration_dict.items():
             if self.protocol_version == 0:
                 self.write("Homing_Offset", motor, calibration.homing_offset)
-            self.write("Min_Position_Limit", motor, calibration.range_min)
-            self.write("Max_Position_Limit", motor, calibration.range_max)
+            model = self.motors[motor].model
+            if model in self.circular_position_models:
+                self.write("Min_Position_Limit", motor, 0)
+                self.write("Max_Position_Limit", motor, self.model_resolution_table[model] - 1)
+            else:
+                self.write("Min_Position_Limit", motor, calibration.range_min)
+                self.write("Max_Position_Limit", motor, calibration.range_max)
 
         if cache:
             self.calibration = calibration_dict
+
+    def reset_calibration(self, motors: NameOrID | Sequence[NameOrID] | None = None) -> None:
+        motor_names = self._get_motors_list(motors)
+
+        for motor in motor_names:
+            model = self._get_motor_model(motor)
+            max_res = self.model_resolution_table[model] - 1
+            if self.protocol_version == 0:
+                self.write("Homing_Offset", motor, 0, normalize=False)
+            self.write("Min_Position_Limit", motor, 0, normalize=False)
+            self.write("Max_Position_Limit", motor, max_res, normalize=False)
+
+        self.calibration = {}
+
+    def set_half_turn_homings(
+        self, motors: NameOrID | Sequence[NameOrID] | None = None
+    ) -> dict[NameOrID, Value]:
+        motor_names = self._get_motors_list(motors)
+        if self.protocol_version == 0:
+            return super().set_half_turn_homings(motor_names)
+
+        # SCS protocol-1 motors do not expose a homing-offset register. Their midpoint is represented in
+        # software by the recorded min/max calibration range instead.
+        self.reset_calibration(motor_names)
+        return dict.fromkeys(motor_names, 0)
 
     def _get_half_turn_homings(self, positions: dict[NameOrID, Value]) -> dict[NameOrID, Value]:
         """

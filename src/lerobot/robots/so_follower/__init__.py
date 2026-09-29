@@ -17,16 +17,19 @@
 from .config_so_follower import (
     SO100FollowerConfig,
     SO101FollowerConfig,
+    SO101SCS215FollowerConfig,
     SOFollowerConfig,
     SOFollowerRobotConfig,
 )
-from .so_follower import SO100Follower, SO101Follower, SOFollower
+from .so_follower import SO100Follower, SO101Follower, SO101SCS215Follower, SOFollower
 
 __all__ = [
     "SO100Follower",
     "SO100FollowerConfig",
     "SO101Follower",
     "SO101FollowerConfig",
+    "SO101SCS215Follower",
+    "SO101SCS215FollowerConfig",
     "SOFollower",
     "SOFollowerConfig",
     "SOFollowerRobotConfig",
