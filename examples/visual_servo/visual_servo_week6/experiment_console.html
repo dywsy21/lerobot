@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>视觉伺服课堂 · 任务 2 / 3</title>
+<style>
+*{box-sizing:border-box}body{overflow-wrap:anywhere;margin:0;background:#f4f6fa;color:#182737;font:16px/1.6 system-ui,"Microsoft YaHei",sans-serif}main{max-width:1240px;margin:24px auto;padding:0 20px}h1{font-size:26px;margin-bottom:4px}h2{font-size:19px;margin-top:0}.sub{color:#567;margin:0 0 20px}.grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(310px,1fr);gap:18px}.card{background:white;border:1px solid #dce3ea;border-radius:12px;padding:18px;margin-bottom:18px}.grid>section,.grid>aside{min-width:0}.camera{width:100%;background:#d3d9df;aspect-ratio:16/9;object-fit:contain;border-radius:8px}.metrics{display:flex;flex-wrap:wrap;gap:16px;padding:12px 0}.metrics strong{font-size:23px;color:#136a80}button{border:1px solid #c6d4df;background:#eef4f8;color:#173347;border-radius:7px;padding:9px 14px;font:inherit;cursor:pointer;margin:4px 5px 4px 0}button.primary{background:#136a80;color:white;border-color:#136a80}button.stop{background:#fff0ed;border-color:#dc9688;color:#8d2219}button:disabled{opacity:.45;cursor:not-allowed}label{display:block;margin:8px 0}input[type=number]{width:85px;padding:7px;border:1px solid #b7c5d1;border-radius:5px}pre{white-space:pre-wrap;word-break:break-word;background:#f5f7f9;font-size:13px;padding:10px;max-height:280px;overflow:auto}#message{padding:12px 15px;border-radius:8px;background:#e8f2f6;min-height:48px}#error{color:#af2515;white-space:pre-wrap}small,.hint{color:#567}.pill{display:inline-block;border:1px solid #b9cdd7;border-radius:20px;padding:2px 12px;margin-right:8px}@media(max-width:850px){.grid{grid-template-columns:1fr}}
+</style>
+<main>
+<h1>视觉伺服课堂 · 任务 2 / 3</h1><p class="sub">相机内参 → 手眼标定 → ArUco 闭环控制</p>
+<div id="message">正在连接本地实验服务…</div><p id="error" role="alert"></p>
+<div class="grid"><section>
+<div class="card"><span class="pill" id="source">数据源</span><span class="pill" id="mode">控制模式</span>
+<p><img class="camera" id="camera" alt="相机或仿真实时画面"></p>
+<div class="metrics"><div>四角点误差<br><strong id="rmse">—</strong></div><div>状态<br><strong id="status">—</strong></div><div>实物伺服步数<br><strong id="commands">0</strong></div></div>
+<button class="primary" data-command="start">开始仿真 / 相机观察</button><button class="stop" data-command="pause">暂停并保持</button>
+<button data-command="reset" id="reset">重置仿真</button><button data-command="occlude" id="occlude">遮挡 / 恢复标记</button><button data-command="goal">将当前四角点设为目标</button>
+<p class="hint">绿色为目标四角点，蓝色为检测四角点。仿真只移动虚拟相机；相机观察只计算建议。</p>
+</div>
+<div class="card"><h2>任务 2 · 固定棋盘，采集手眼配对</h2>
+<p>棋盘为 <b>8×6 内角点、单格 25 mm</b>。相机固定在末端，棋盘与基座保持不动；每次改变机械臂姿态后停稳，再保存配对。</p>
+<p>训练 <b id="train">0</b> / 至少 12 组；独立验证 <b id="validation">0</b> / 建议至少 3 组。姿态应绕至少两个不同轴旋转。</p>
+<button data-command="view-board">显示棋盘角点与原点</button><button data-command="view-marker">显示 ArUco 伺服</button>
+<label><input type="checkbox" id="reverse"> 反转棋盘角点顺序（确保红色原点始终对应同一物理内角点）</label>
+<button id="capture-train">保存训练配对</button><button id="capture-validation">保存独立验证配对</button>
+<p>独立实测棋盘原点在基座系中的坐标，单位米：</p>
+<label>X <input type="number" step="0.001" id="bx"> Y <input type="number" step="0.001" id="by"> Z <input type="number" step="0.001" id="bz"></label>
+<button id="solve" class="primary">求解并验证手眼矩阵</button>
+<p class="hint">真实配对同时读取照片及拍照前后的关节反馈。旧 8766 缩略预览只能观察，不能用于配对。每轴 5 cm 检查需要上面的独立实测坐标。</p>
+</div></section><aside>
+<div class="card"><h2>设备与实物运动</h2><p id="device">未连接机械臂</p>
+<button data-command="connect" id="connect">连接并读取关节</button>
+<label><input type="checkbox" id="teach-check"> 已支撑机械臂，准备释放关节并手动调整姿态</label><button id="teach">释放关节，手动采集</button>
+<label><input type="checkbox" id="motion-check"> 已核对相机安装、关节标定、限位与周围空间，准备低速实验</label>
+<button class="primary" id="execute">启用实物伺服</button>
+<p class="hint">连接操作只读取状态。启用运动需要真实标记参数及通过独立验证的手眼矩阵。目标丢失、反馈过旧或控制页面心跳超时，会暂停并保持。</p>
+<p class="hint">当前配置中的 60 mm 标记仅是仿真示例。实物字典、ID、黑色外边框边长须填写 configs/experiment.yaml；填写后重启服务。</p>
+</div>
+<div class="card"><h2>课堂记录</h2><p>任务 1 已完成：20 张标定 + 3 张验证，整体 RMS <b>0.828 px</b>。</p><p id="log"></p><details><summary>当前计算结果</summary><pre id="details"></pre></details></div>
+</aside></div></main>
+<script>
+const token="__STATION_TOKEN__";let busy=false;let state=null;
+async function command(name,payload={}){document.querySelector('#error').textContent='';try{const r=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json','X-Station-Token':token},body:JSON.stringify({command:name,...payload})});const d=await r.json();if(!r.ok)throw Error(d.error);render(d);return d;}catch(e){document.querySelector('#error').textContent=e.message;}}
+function render(s){state=s;const a=s.advice||{};document.querySelector('#source').textContent=({simulation:'仿真 · 无实物运动',camera:'原生相机',broker:'旧预览 · 仅观察'})[s.source];document.querySelector('#mode').textContent=s.controller_mode.toUpperCase();document.querySelector('#message').textContent=s.message;document.querySelector('#rmse').textContent=a.rmse_px==null?'—':a.rmse_px.toFixed(2)+' px';document.querySelector('#status').textContent=a.status||'等待画面';document.querySelector('#commands').textContent=s.hardware_command_count;document.querySelector('#train').textContent=s.task2.training_pairs;document.querySelector('#validation').textContent=s.task2.validation_pairs;document.querySelector('#device').textContent=s.robot_connected?'机械臂已连接 · '+(s.robot_armed?'力矩已启用':'未启用力矩'):'机械臂未连接';document.querySelector('#details').textContent=JSON.stringify(a,null,2);document.querySelector('#log').textContent='记录目录：'+s.log_directory;document.querySelector('#reset').disabled=s.source!=='simulation';document.querySelector('#occlude').disabled=s.source!=='simulation';document.querySelector('#connect').disabled=!s.hardware_enabled_by_launch||s.robot_connected;document.querySelector('#execute').disabled=!s.robot_connected||!s.marker_size_confirmed;document.querySelector('#teach').disabled=!s.robot_connected;document.querySelector('#solve').disabled=!s.task2.ready_to_solve;document.querySelector('#capture-train').disabled=!(s.source==='camera'&&s.robot_connected);document.querySelector('#capture-validation').disabled=!(s.source==='camera'&&s.robot_connected);}
+document.querySelectorAll('[data-command]').forEach(b=>b.onclick=()=>command(b.dataset.command,{reverse_corners:document.querySelector('#reverse').checked}));
+document.querySelector('#teach').onclick=()=>{if(!document.querySelector('#teach-check').checked){document.querySelector('#error').textContent='请先支撑机械臂，再勾选释放关节准备项。';return;}command('teach',{supported:true});};
+document.querySelector('#capture-train').onclick=()=>command('capture',{validation:false,reverse_corners:document.querySelector('#reverse').checked});document.querySelector('#capture-validation').onclick=()=>command('capture',{validation:true,reverse_corners:document.querySelector('#reverse').checked});
+document.querySelector('#execute').onclick=()=>{if(!document.querySelector('#motion-check').checked){document.querySelector('#error').textContent='请先核对设备和实验空间，并勾选准备项。';return;}command('execute');};
+document.querySelector('#solve').onclick=()=>{const entries=['bx','by','bz'].map(id=>document.getElementById(id).value);if(entries.some(v=>v.trim()===''||!Number.isFinite(Number(v)))){document.querySelector('#error').textContent='请填写独立实测的 X、Y、Z 米坐标。';return;}command('solve',{board_origin_m:entries.map(Number)});};
+async function poll(){if(busy)return;busy=true;try{const r=await fetch('/api/status');if(!r.ok)throw Error('服务不可用');render(await r.json());document.querySelector('#camera').src='/frame.jpg?t='+Date.now();}catch(e){document.querySelector('#error').textContent='连接中断：'+e.message;}finally{busy=false;}}
+setInterval(poll,500);setInterval(()=>{if(state&&state.executing&&!document.hidden)command('heartbeat');},400);poll();
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&state&&state.executing)command('pause');});window.addEventListener('keydown',e=>{if(e.code==='Space'&&!['INPUT','TEXTAREA'].includes(document.activeElement.tagName)){e.preventDefault();command('pause');}});
+</script></html>

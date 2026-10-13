@@ -1,0 +1,27 @@
+# Paths are relative to examples/visual_servo. Start with simulation.
+intrinsics: results/task1/intrinsics.yaml
+robot_model: configs/robot_model.json
+hand_eye: results/task2/hand_eye.yaml
+task2_directory: data/task2
+log_directory: outputs/sessions
+
+# Fill these from your existing physical marker; 60 mm is ONLY a simulation fallback.
+marker:
+  dictionary: null
+  id: null
+  side_length_m: null
+  confirmed: false
+
+controller:
+  mode: ibvs
+  gain: 0.8
+  damping: 0.02
+  dt_s: 0.1
+  max_linear_speed_m_s: 0.01
+  max_angular_speed_rad_s: 0.10
+  maximum_joint_step_rad: 0.006
+  stop_rmse_px: 2.0
+  minimum_depth_m: 0.15
+  maximum_depth_m: 2.0
+  maximum_frame_age_s: 0.5
+  maximum_pose_rmse_px: 2.0
