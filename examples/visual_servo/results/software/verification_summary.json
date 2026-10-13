@@ -1,0 +1,71 @@
+{
+  "physical_hardware_used": false,
+  "physical_task2_completed": false,
+  "physical_task3_completed": false,
+  "unit_tests_passed": true,
+  "task2_synthetic": {
+    "training_pairs": 12,
+    "validation_pairs": 4,
+    "translation_error_m": 0.001675088662752992,
+    "rotation_error_deg": 0.205253871198914,
+    "validated_for_physical_servo": false,
+    "passed": true
+  },
+  "task3_simulation": {
+    "data_source": "synthetic_marker_scene_with_measured_task1_intrinsics",
+    "camera_intrinsics_file": "results/task1/intrinsics.yaml",
+    "camera_calibration_rms_px": 0.828024977620347,
+    "physical_hardware_used": false,
+    "physical_task3_completed": false,
+    "marker_side_m_in_simulation": 0.06,
+    "image_size": [
+      1280,
+      720
+    ],
+    "initial_rmse_px": 178.93568314508227,
+    "final_rmse_px": 1.910235316617134,
+    "steps": 220,
+    "reached": true,
+    "target_loss_zero_velocity": true,
+    "maximum_linear_speed_m_s": 0.010000000000000002,
+    "maximum_angular_speed_rad_s": 0.01619622617180797,
+    "settings": {
+      "dictionary": "DICT_4X4_50",
+      "marker_id": 0,
+      "side_length_m": 0.06,
+      "marker_size_confirmed": false,
+      "mode": "ibvs",
+      "gain": 0.8,
+      "damping": 0.02,
+      "dt_s": 0.1,
+      "max_linear_speed_m_s": 0.01,
+      "max_angular_speed_rad_s": 0.1,
+      "stop_rmse_px": 2.0,
+      "minimum_depth_m": 0.15,
+      "maximum_depth_m": 2.0,
+      "maximum_frame_age_s": 0.5,
+      "maximum_pose_rmse_px": 2.0,
+      "maximum_joint_step_rad": 0.006
+    },
+    "video": "task3-simulation/task3_ibvs_simulation.mp4",
+    "passed": true
+  },
+  "passed": true,
+  "unit_tests_count": 52,
+  "lint": {
+    "ruff_version": "0.14.1",
+    "check_passed": true,
+    "format_check_passed": true,
+    "bandit_version": "1.8.6",
+    "bandit_passed": true
+  },
+  "web_console": {
+    "url": "http://127.0.0.1:8767/",
+    "source": "simulation",
+    "browser_verified": true,
+    "physical_servo_steps": 0
+  },
+  "verified_at_utc": "2026-10-13T06:38:05.677556+00:00",
+  "validation_bundle_name": "visual-servo-ready-20261013",
+  "video_path_base": "local validation bundle"
+}

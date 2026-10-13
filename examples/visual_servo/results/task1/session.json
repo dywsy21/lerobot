@@ -1,0 +1,17 @@
+{
+  "data_source": "real_usb_camera",
+  "camera_name": "GENERAL WEBCAM",
+  "camera_index": 2,
+  "image_size": [
+    1280,
+    720
+  ],
+  "board_inner_corners": [
+    8,
+    6
+  ],
+  "square_size_m": 0.025,
+  "autofocus_disable_request_accepted": false,
+  "autofocus_readback": -1.0,
+  "created_local": "2026-10-12T20:35:25"
+}

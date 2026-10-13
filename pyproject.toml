@@ -93,6 +93,15 @@ dependencies = [
 # Optional dependencies
 [project.optional-dependencies]
 
+# Camera calibration and eye-in-hand coursework in examples/visual_servo.
+visual-servo = [
+    "lerobot[scipy-dep,av-dep]",
+    "opencv-python-headless>=4.13.0,<4.14.0",
+    "PyYAML>=6.0,<7.0",
+    "defusedxml>=0.7.1,<1.0",
+    "pygrabber>=0.2 ; sys_platform == 'win32'",
+]
+
 # ── Feature-scoped extras ──────────────────────────────────
 lancedb = [
     "lerobot[dataset]",
@@ -503,6 +512,8 @@ default.extend-ignore-identifiers-re = [
     # Add individual words here to ignore them
     "2nd",
     "pn",
+    "PnP",
+    "solvePnP(?:Generic)?",
     "ser",
     "ein",
     "thw",

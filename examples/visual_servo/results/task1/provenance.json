@@ -1,0 +1,6 @@
+{
+  "data_source": "real_usb_camera",
+  "original_session": "20261012-203517",
+  "original_intrinsics_sha256": "1708145443765d708c6c65dd756ac187df39c02a195b6f8c033f86b078c562a8",
+  "note": "Original calibration retained. YAML/JSON image paths changed to paths relative to this directory; matrices, coefficients and errors are unchanged."
+}

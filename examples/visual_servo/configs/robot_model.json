@@ -1,0 +1,28 @@
+{
+  "backend": "portable_urdf",
+  "urdf_path": null,
+  "base_frame": null,
+  "end_frame": "gripper_frame_link",
+  "joint_names": ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"],
+  "observation_units": "normalized_0_1",
+  "normalized_joint_calibration": {
+    "shoulder_pan": {"q_at_0_deg": null, "q_at_1_deg": null},
+    "shoulder_lift": {"q_at_0_deg": null, "q_at_1_deg": null},
+    "elbow_flex": {"q_at_0_deg": null, "q_at_1_deg": null},
+    "wrist_flex": {"q_at_0_deg": null, "q_at_1_deg": null},
+    "wrist_roll": {"q_at_0_deg": null, "q_at_1_deg": null}
+  },
+  "joint_limits_deg": {
+    "shoulder_pan": null,
+    "shoulder_lift": null,
+    "elbow_flex": null,
+    "wrist_flex": null,
+    "wrist_roll": null
+  },
+  "motor_model": "scs215",
+  "motor_ids": {"shoulder_pan": 1, "shoulder_lift": 2, "elbow_flex": 3, "wrist_flex": 4, "wrist_roll": 5},
+  "motor_calibration_path": null,
+  "port": "COM3",
+  "baudrate": 1000000,
+  "note": "Template only. Confirm the real URDF chain, camera mount frame, joint IDs, measured degree endpoints and safe limits. Paths are relative to the repository root. Gripper is excluded only if the camera frame does not move with the gripper joint."
+}
